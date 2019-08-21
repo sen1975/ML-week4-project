@@ -1,0 +1,230 @@
+---
+title: "ML - Project"
+author: "Dr.Senthil"
+date: "20/08/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE, fig.width=10, fig.height=5)
+#options(width=120)
+library(lattice)
+library(ggplot2)
+library(plyr)
+library(randomForest)
+```
+
+
+## Executive Summary
+
+The data for this project come from this source: http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har. 
+
+Steps to be followed:
+
+1. Data processing
+2. Data Exploration   
+3. Model selection 
+4. Model examination 
+5. Conclusion  
+6. Prediction
+
+
+## Data Processing
+
+Change 'am' to  factor (0 = automatic, 1 = manual)
+Make cylinders a factor as well (since it is not continious)
+
+```{r}
+training.raw <- read.csv("pml-training.csv")
+testing.raw <- read.csv("pml-testing.csv")
+```
+
+
+## Data Exploration
+
+Look at the dimensions & head of the dataset to get an idea
+```{r}
+ dim(training.raw)
+ 
+# Remove blank values
+mNA = 20
+maxNACount <- nrow(training.raw) / 100 * mNA
+removeColumns <- which(colSums(is.na(training.raw) | training.raw=="") > maxNACount)
+training.cleaned01 <- training.raw[,-removeColumns]
+testing.cleaned01 <- testing.raw[,-removeColumns]
+```
+
+Remove all time related data, since we won't use those
+
+```{r}
+removeColumns <- grep("timestamp", names(training.cleaned01))
+training.cleaned02 <- training.cleaned01[,-c(1, removeColumns )]
+testing.cleaned02 <- testing.cleaned01[,-c(1, removeColumns )]
+```
+
+Convert all factors to integers
+```{r}
+classeLevels <- levels(training.cleaned02$classe)
+training.cleaned03 <- data.frame(data.matrix(training.cleaned02))
+training.cleaned03$classe <- factor(training.cleaned03$classe, labels=classeLevels)
+testing.cleaned03 <- data.frame(data.matrix(testing.cleaned02))
+```
+
+Set the dataset to be explored
+
+```{r}
+training.cleaned <- training.cleaned03
+testing.cleaned <- testing.cleaned03
+```
+
+# Split the current training in a test and train set to work with
+
+```{r}
+set.seed(19791108)
+library(caret)
+classeIndex <- which(names(training.cleaned) == "classe")
+partition <- createDataPartition(y=training.cleaned$classe, p=0.75, list=FALSE)
+training.subSetTrain <- training.cleaned[partition, ]
+training.subSetTest <- training.cleaned[-partition, ]
+```
+
+# Fields that have high correlations
+
+```{r}
+correlations <- cor(training.subSetTrain[, -classeIndex], as.numeric(training.subSetTrain$classe))
+bestCorrelations <- subset(as.data.frame(as.table(correlations)), abs(Freq)>0.3)
+bestCorrelations
+```
+
+# Plotting of the two possible linear predictors
+
+```{r}
+library(Rmisc)
+p1 <- ggplot(training.subSetTrain, aes(classe,pitch_forearm)) + 
+  geom_boxplot(aes(fill=classe))
+p2 <- ggplot(training.subSetTrain, aes(classe, magnet_arm_x)) + 
+  geom_boxplot(aes(fill=classe))
+multiplot(p1,p2,cols=2)
+```
+
+This shows there is any wide separation among these correlated features
+
+## Model selection
+
+```{r}
+library(corrplot)
+correlationMatrix <- cor(training.subSetTrain[, -classeIndex])
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.9, exact=TRUE)
+excludeColumns <- c(highlyCorrelated, classeIndex)
+corrplot(correlationMatrix, method="color", type="lower", order="hclust", tl.cex=0.70, tl.col="black", tl.srt = 45, diag = FALSE)
+```
+
+This shows there are few correlated features. The model is to exclude them from PCA
+
+```{r}
+pcaPreProcess.all <- preProcess(training.subSetTrain[, -classeIndex], method = "pca", thresh = 0.99)
+training.subSetTrain.pca.all <- predict(pcaPreProcess.all, training.subSetTrain[, -classeIndex])
+training.subSetTest.pca.all <- predict(pcaPreProcess.all, training.subSetTest[, -classeIndex])
+testing.pca.all <- predict(pcaPreProcess.all, testing.cleaned[, -classeIndex])
+pcaPreProcess.subset <- preProcess(training.subSetTrain[, -excludeColumns], method = "pca", thresh = 0.99)
+training.subSetTrain.pca.subset <- predict(pcaPreProcess.subset, training.subSetTrain[, -excludeColumns])
+training.subSetTest.pca.subset <- predict(pcaPreProcess.subset, training.subSetTest[, -excludeColumns])
+testing.pca.subset <- predict(pcaPreProcess.subset, testing.cleaned[, -classeIndex])
+```
+
+Do the Random Forest training with 52 trees
+
+```{r}
+memory.limit(size=500)
+ntree <- 52
+start <- proc.time()
+rfMod.cleaned <- randomForest(
+  x=training.subSetTrain[, -classeIndex], 
+  y=training.subSetTrain$classe,
+  xtest=training.subSetTest[, -classeIndex], 
+  ytest=training.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) #do.trace=TRUE
+proc.time() - start
+start <- proc.time()
+rfMod.exclude <- randomForest(
+  x=training.subSetTrain[, -excludeColumns], 
+  y=training.subSetTrain$classe,
+  xtest=training.subSetTest[, -excludeColumns], 
+  ytest=training.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) #do.trace=TRUE
+proc.time() - start
+start <- proc.time()
+rfMod.pca.all <- randomForest(
+  x=training.subSetTrain.pca.all, 
+  y=training.subSetTrain$classe,
+  xtest=training.subSetTest.pca.all, 
+  ytest=training.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) #do.trace=TRUE
+proc.time() - start
+start <- proc.time()
+rfMod.pca.subset <- randomForest(
+  x=training.subSetTrain.pca.subset, 
+  y=training.subSetTrain$classe,
+  xtest=training.subSetTest.pca.subset, 
+  ytest=training.subSetTest$classe, 
+  ntree=ntree,
+  keep.forest=TRUE,
+  proximity=TRUE) #do.trace=TRUE
+proc.time() - start
+```
+
+## Model examination
+
+With the above fourtrained models, checking for the accuracies of each.
+
+```{r}
+rfMod.cleaned
+rfMod.cleaned.training.acc <- round(1-sum(rfMod.cleaned$confusion[, 'class.error']),3)
+paste0("Accuracy on training: ",rfMod.cleaned.training.acc)
+rfMod.cleaned.testing.acc <- round(1-sum(rfMod.cleaned$test$confusion[, 'class.error']),3)
+paste0("Accuracy on testing: ",rfMod.cleaned.testing.acc)
+rfMod.exclude
+rfMod.exclude.training.acc <- round(1-sum(rfMod.exclude$confusion[, 'class.error']),3)
+paste0("Accuracy on training: ",rfMod.exclude.training.acc)
+rfMod.exclude.testing.acc <- round(1-sum(rfMod.exclude$test$confusion[, 'class.error']),3)
+paste0("Accuracy on testing: ",rfMod.exclude.testing.acc)
+rfMod.pca.all
+rfMod.pca.all.training.acc <- round(1-sum(rfMod.pca.all$confusion[, 'class.error']),3)
+paste0("Accuracy on training: ",rfMod.pca.all.training.acc)
+rfMod.pca.all.testing.acc <- round(1-sum(rfMod.pca.all$test$confusion[, 'class.error']),3)
+paste0("Accuracy on testing: ",rfMod.pca.all.testing.acc)
+rfMod.pca.subset
+rfMod.pca.subset.training.acc <- round(1-sum(rfMod.pca.subset$confusion[, 'class.error']),3)
+paste0("Accuracy on training: ",rfMod.pca.subset.training.acc)
+rfMod.pca.subset.testing.acc <- round(1-sum(rfMod.pca.subset$test$confusion[, 'class.error']),3)
+paste0("Accuracy on testing: ",rfMod.pca.subset.testing.acc)
+```
+
+## Conclusion
+
+This shows that  PCA doesn't have a positive of the accuracy 
+The `rfMod.exclude` perform's slightly better then the 'rfMod.cleaned'
+
+Thus `rfMod.exclude` model is the best model to use for predicting the test set. It has an accuracy of 98.7% and an estimated out of bound error rate of 0.23%.
+
+
+# Test results
+
+The `rfMod.exclude` is choosen as the best model. It is compared with other 3 models.
+
+```{r}
+predictions <- t(cbind(
+    exclude=as.data.frame(predict(rfMod.exclude, testing.cleaned[, -excludeColumns]), optional=TRUE),
+    cleaned=as.data.frame(predict(rfMod.cleaned, testing.cleaned), optional=TRUE),
+    pcaAll=as.data.frame(predict(rfMod.pca.all, testing.pca.all), optional=TRUE),
+    pcaExclude=as.data.frame(predict(rfMod.pca.subset, testing.pca.subset), optional=TRUE)
+))
+predictions
+```
+
